@@ -642,6 +642,24 @@ input:disabled,select:disabled{opacity:.55;cursor:not-allowed;background:#171a26
 <!-- TOAST -->
 <div class="toast" id="toast"></div>
 
+<!-- FIREBASE / FIRESTORE: fuente única en línea -->
+<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore-compat.js"></script>
+<script>
+// Configuración Firebase. Si este proyecto no es el correcto, solo cambia estos valores.
+window.FIREBASE_CONFIG_DQO = {
+  apiKey: "AIzaSyCzli4-Vdty3ieqEoELgEyClRMtyJt7q40",
+  authDomain: "psi-lims-mrc.firebaseapp.com",
+  projectId: "psi-lims-mrc",
+  storageBucket: "psi-lims-mrc.firebasestorage.app",
+  messagingSenderId: "1019983686064",
+  appId: "1:1019983686064:web:1cd2902d51a2ecc37ece75"
+};
+// Ruta única donde vive la base del sistema.
+window.FIRESTORE_DQO_COLLECTION = 'control_dqo_2026';
+window.FIRESTORE_DQO_DOC = 'base_principal';
+</script>
+
 <script>
 // ══════════════ DATA ══════════════
 const SK = 'dqo26_v6_check_dqo_tens_analisis';
@@ -660,12 +678,71 @@ function normalizarStatusProceso(arr){
   });
   return arr;
 }
-function loadData(){
-  try{ const raw=localStorage.getItem(SK); const arr=raw?JSON.parse(raw):JSON.parse(JSON.stringify(ORIG)); return normalizarStatusProceso(arr); }
-  catch(e){ return normalizarStatusProceso(JSON.parse(JSON.stringify(ORIG))); }
-}
-function saveData(){ localStorage.setItem(SK, JSON.stringify(DATA)); }
+// Firebase es la fuente principal. localStorage queda solo como caché de arranque si no hay internet.
+let FB_DB=null, FB_READY=false, FB_LOADING=false, FB_REMOTE_TS=0;
 let DATA = loadData();
+
+function loadData(){
+  try{
+    const cache=localStorage.getItem(SK+'_cache');
+    const viejo=localStorage.getItem(SK);
+    const raw=cache || viejo;
+    const arr=raw?JSON.parse(raw):JSON.parse(JSON.stringify(ORIG));
+    return normalizarStatusProceso(arr);
+  }catch(e){ return normalizarStatusProceso(JSON.parse(JSON.stringify(ORIG))); }
+}
+function firebaseStatus(txt,type='inf'){
+  try{ toast(txt,type); }catch(e){ console.log(txt); }
+}
+function docRefDQO(){
+  return FB_DB.collection(window.FIRESTORE_DQO_COLLECTION||'control_dqo_2026').doc(window.FIRESTORE_DQO_DOC||'base_principal');
+}
+function saveData(){
+  try{ localStorage.setItem(SK+'_cache', JSON.stringify(DATA)); }catch(e){}
+  if(!FB_READY || !FB_DB){ return; }
+  try{
+    return docRefDQO().set({
+      registros: normalizarStatusProceso(DATA||[]),
+      total: (DATA||[]).length,
+      actualizado: firebase.firestore.FieldValue.serverTimestamp(),
+      actualizadoLocal: new Date().toISOString()
+    }, {merge:true}).catch(err=>{
+      console.error('Firestore saveData:',err);
+      firebaseStatus('⚠️ No se pudo guardar en Firestore. Revise reglas/conexión.','err');
+    });
+  }catch(e){ console.error('saveData Firestore:',e); }
+}
+async function initFirebaseDQO(){
+  if(FB_LOADING) return; FB_LOADING=true;
+  try{
+    if(!window.firebase || !window.FIREBASE_CONFIG_DQO){ firebaseStatus('⚠️ Firebase no está configurado','err'); return; }
+    if(!firebase.apps.length) firebase.initializeApp(window.FIREBASE_CONFIG_DQO);
+    FB_DB=firebase.firestore();
+    FB_READY=true;
+    const ref=docRefDQO();
+    const snap=await ref.get();
+    if(!snap.exists || !Array.isArray((snap.data()||{}).registros)){
+      await ref.set({registros: normalizarStatusProceso(DATA||[]), total:(DATA||[]).length, creado:new Date().toISOString(), actualizadoLocal:new Date().toISOString()}, {merge:true});
+      firebaseStatus('☁️ Base inicial subida a Firestore','ok');
+    }
+    ref.onSnapshot(ds=>{
+      const d=ds.data()||{};
+      if(Array.isArray(d.registros)){
+        DATA=normalizarStatusProceso(d.registros);
+        try{ localStorage.setItem(SK+'_cache', JSON.stringify(DATA)); }catch(e){}
+        try{ refreshUI(); }catch(e){}
+        try{ actualizarKPIsDesdeDATA(); }catch(e){}
+      }
+    }, err=>{
+      console.error('Firestore onSnapshot:',err);
+      firebaseStatus('⚠️ Sin lectura Firestore. Revise reglas o configuración.','err');
+    });
+  }catch(e){
+    console.error('initFirebaseDQO:',e);
+    firebaseStatus('⚠️ Firebase no conectó. Se usará caché local temporal.','err');
+  }
+}
+window.addEventListener('DOMContentLoaded', initFirebaseDQO);
 
 // ══════════════ DQO ══════════════
 function dqoNum(v){
@@ -1808,6 +1885,42 @@ function refrescarTodoFinal(){
 // Asegura que la pestaña esté actualizada al cargar.
 setTimeout(()=>{try{renderAnalisisDQO();}catch(e){}},100);
 
+
+// ══════════════ KPI DINÁMICO DESDE DATA/FIRESTORE ══════════════
+function numFmt(n){ return Number(n||0).toLocaleString('es-EC'); }
+function setCardValue(label, value, sub){
+  const cards=[...document.querySelectorAll('.kc')];
+  const c=cards.find(x=>String((x.querySelector('.lbl')||{}).textContent||'').trim().toUpperCase()===label.toUpperCase());
+  if(!c) return;
+  const v=c.querySelector('.val'); if(v) v.textContent=value;
+  if(sub!==undefined){ const s=c.querySelector('.sub'); if(s) s.textContent=sub; }
+}
+function promedioDQO(){
+  const vals=(DATA||[]).map(r=>dqoNum(r.dqo)).filter(v=>v!==null && isFinite(v));
+  if(!vals.length) return null;
+  return Math.round(vals.reduce((a,b)=>a+b,0)/vals.length);
+}
+function actualizarKPIsDesdeDATA(){
+  const total=(DATA||[]).length;
+  const conDqo=(DATA||[]).filter(r=>dqoNum(r.dqo)!==null).length;
+  const prom=promedioDQO();
+  const max=Math.max(0,...(DATA||[]).map(r=>dqoNum(r.dqo)).filter(v=>v!==null && isFinite(v)));
+  const det=(DATA||[]).filter(r=>String(r.status||r.estado||'').toUpperCase().includes('DETENIDA')).length;
+  setCardValue('Total Muestras', numFmt(total), 'Año 2026 completo');
+  setCardValue('Total Anual', numFmt(total));
+  setCardValue('Con Resultado DQO', numFmt(conDqo), total?((conDqo/total*100).toFixed(1)+'% del total'):'0% del total');
+  setCardValue('DQO Promedio Global', prom===null?'—':numFmt(prom), 'mg/L · máx '+numFmt(max));
+  setCardValue('Muestras Detenidas', numFmt(det), 'Requieren acción');
+  const h=document.querySelector('.hdr .sub');
+  if(h) h.innerHTML='Año 2026 &nbsp;·&nbsp; '+numFmt(total)+' muestras registradas &nbsp;·&nbsp; Semana actual: 26 &nbsp;·&nbsp; ☁️ Firestore';
+}
+const _refreshUIDinamico = refreshUI;
+refreshUI = function(){
+  _refreshUIDinamico();
+  try{ actualizarKPIsDesdeDATA(); }catch(e){}
+};
+setTimeout(()=>{try{actualizarKPIsDesdeDATA();}catch(e){}},150);
+
 // ══════════════ EXPORT CSV ══════════════
 function exportCSV(){
   const hdr=['FECHA','CÓDIGO','MATRIZ','GRUPO','CLIENTE','SUCURSAL','MES/FRECUENCIA','DQO (mg/L)','TENSOACTIVOS (mg/L)','STATUS','ESTADO','CLASIF. DQO'];
@@ -1827,9 +1940,10 @@ function exportCSV(){
 function resetData(){
   if(!confirm('¿Restaurar los datos originales del Excel? Se perderán todos los cambios.')) return;
   localStorage.removeItem(SK);
-  DATA=JSON.parse(JSON.stringify(ORIG));
+  localStorage.removeItem(SK+'_cache');
+  DATA=normalizarStatusProceso(JSON.parse(JSON.stringify(ORIG)));
   saveData();
-  refreshUI(); toast('↺ Datos restaurados','inf');
+  refreshUI(); toast('↺ Datos restaurados en Firestore','inf');
 }
 
 // ══════════════ TOAST ══════════════
