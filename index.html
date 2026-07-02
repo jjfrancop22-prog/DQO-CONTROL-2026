@@ -487,9 +487,12 @@ function installPsiCodigoAutocompleteRobusto(){
     const el=d.getElementById(id);
     if(el){ el.value=val||''; el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})); }
   }
+  let psiIsFilling=false;
   function fill(r){
-    if(!r) return;
-    setVal('m-cod',r.codigo);
+    if(!r || psiIsFilling) return;
+    psiIsFilling=true;
+    const codeEl=d.getElementById('m-cod');
+    if(codeEl) codeEl.value=r.codigo||''; // NO disparar input/change aquí: evita bucle infinito en Safari/Chrome
     setVal('m-cli',r.cliente);
     setVal('m-suc',r.sucursal || 'MATRIZ');
     setVal('m-mat',r.matriz || 'RESIDUAL');
@@ -502,6 +505,7 @@ function installPsiCodigoAutocompleteRobusto(){
     }
     try{ if(typeof w.actualizarIngresoPreview==='function') w.actualizarIngresoPreview(); }catch(e){}
     box.style.display='none';
+    setTimeout(()=>{ psiIsFilling=false; },0);
   }
   function findExact(v){
     const vv=normCommonKey(v), vn=String(v||'').trim().replace(/^0+/,'');
@@ -524,9 +528,9 @@ function installPsiCodigoAutocompleteRobusto(){
     cod.dataset.psiRobustoLinked='1';
     cod.setAttribute('autocomplete','off');
     cod.addEventListener('focus',render);
-    cod.addEventListener('input',()=>{ const r=findExact(cod.value); if(r) fill(r); else render(); });
-    cod.addEventListener('change',()=>{ const r=findExact(cod.value); if(r) fill(r); });
-    cod.addEventListener('blur',()=>setTimeout(()=>{box.style.display='none'; const r=findExact(cod.value); if(r) fill(r);},180));
+    cod.addEventListener('input',()=>{ if(psiIsFilling) return; const r=findExact(cod.value); if(r) fill(r); else render(); });
+    cod.addEventListener('change',()=>{ if(psiIsFilling) return; const r=findExact(cod.value); if(r) fill(r); });
+    cod.addEventListener('blur',()=>setTimeout(()=>{box.style.display='none'; if(psiIsFilling) return; const r=findExact(cod.value); if(r) fill(r);},180));
     w.addEventListener('scroll',()=>{ if(box.style.display!=='none') pos(); },true);
     w.addEventListener('resize',()=>{ if(box.style.display!=='none') pos(); });
   }
@@ -552,7 +556,7 @@ function refreshCommonBridge(){
   loadHtmlIntoFrame(fm,HTML_MUESTRAS_B64);
   loadHtmlIntoFrame(fi,HTML_INFORMES_B64);
   if(ff) loadHtmlIntoFrame(ff,HTML_FACTURACION_B64);
-  setInterval(refreshCommonBridge,5000);
+  setInterval(refreshCommonBridge,15000);
 })();
 </script>
 </body>
